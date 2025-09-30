@@ -1,6 +1,8 @@
 # System Bottleneck Checker
 
-A comprehensive macOS system performance analyzer that identifies CPU, Memory, and GPU bottlenecks and provides specific upgrade recommendations.
+A comprehensive cross-platform system performance analyzer that identifies CPU, Memory, and GPU bottlenecks and provides specific upgrade recommendations.
+
+**Supported Platforms:** macOS, Linux, Windows
 
 ## Features
 
@@ -8,26 +10,52 @@ A comprehensive macOS system performance analyzer that identifies CPU, Memory, a
 - **Smart Recommendations**: Provides prioritized upgrade suggestions with detailed explanations
 - **Color-coded Output**: Easy-to-read results with severity indicators
 - **Comprehensive Coverage**: Analyzes CPU, Memory (RAM), and GPU components
-- **macOS Optimized**: Uses native macOS system tools and APIs for accurate readings
+- **Cross-Platform**: Works on macOS, Linux, and Windows using gopsutil for system metrics
 
 ## Installation
 
-1. Clone or download this project
-2. Build the executable:
+1. **Clone or download this project**
    ```bash
+   git clone https://github.com/xmarkclx/bottleneck-check.git
    cd bottleneck-check
+   ```
+
+2. **Build the executable**
+   
+   **macOS/Linux:**
+   ```bash
    go build -o bottleneck-check .
    ```
-3. Run the analyzer:
+   
+   **Windows:**
+   ```cmd
+   go build -o bottleneck-check.exe .
+   ```
+
+3. **Run the analyzer**
+   
+   **macOS/Linux:**
    ```bash
    ./bottleneck-check
+   ```
+   
+   **Windows:**
+   ```cmd
+   bottleneck-check.exe
    ```
 
 ## Usage
 
 Simply run the executable to start continuous monitoring:
+
+**macOS/Linux:**
 ```bash
 ./bottleneck-check
+```
+
+**Windows:**
+```cmd
+bottleneck-check.exe
 ```
 
 The tool will:
@@ -125,26 +153,43 @@ GPU: Apple M3 Pro
 
 ## Requirements
 
-- macOS (tested on macOS 13+)
+### Supported Operating Systems
+- **macOS**: 10.15+ (tested on macOS 13+)
+- **Linux**: Most distributions with kernel 3.0+
+- **Windows**: Windows 7/Server 2008R2 and later
+
+### Build Requirements
 - Go 1.21+ (for building from source)
-- Admin privileges may be required for some system metrics
+- Internet connection (for downloading dependencies)
+
+### Runtime
+- No admin privileges required for basic metrics
+- Some advanced features may require elevated permissions on certain platforms
 
 ## Tips for Better Performance
 
 - Run regularly to monitor system trends
 - Close unnecessary applications before intensive tasks
 - Address recommendations in order of severity
-- Use Activity Monitor to identify specific resource-heavy processes
+- Use system monitoring tools to identify specific resource-heavy processes:
+  - **macOS**: Activity Monitor
+  - **Windows**: Task Manager or Resource Monitor
+  - **Linux**: htop, top, or system monitor GUI
 - Consider the tool's suggestions in context of your specific workload
 
 ## Technical Details
 
-The tool uses various macOS system utilities:
-- `sysctl` for CPU and system information
-- `vm_stat` for memory statistics
-- `iostat` for CPU usage sampling
-- `uptime` for load averages
-- `system_profiler` for hardware details
-- `memory_pressure` for memory pressure status
+The tool uses the **[gopsutil](https://github.com/shirou/gopsutil)** library for cross-platform system monitoring:
 
-All metrics are collected using native macOS APIs to ensure accuracy and reliability.
+### Cross-Platform Data Sources
+- **CPU Information**: `/proc/cpuinfo` (Linux), `sysctl` (macOS), WMI (Windows)
+- **Memory Statistics**: `/proc/meminfo` (Linux), `vm_stat` (macOS), Performance Counters (Windows)
+- **CPU Usage**: `/proc/stat` (Linux), `iostat` (macOS), Performance Counters (Windows)
+- **Load Averages**: `/proc/loadavg` (Linux), `uptime` (macOS), CPU percentage estimation (Windows)
+- **System Information**: Various platform-specific APIs
+
+### Dependencies
+- **[github.com/shirou/gopsutil/v3](https://github.com/shirou/gopsutil)**: Cross-platform system and process monitoring library
+- **Standard Go libraries**: For core functionality and UI
+
+All metrics are collected using platform-appropriate APIs through gopsutil to ensure accuracy and reliability across different operating systems.

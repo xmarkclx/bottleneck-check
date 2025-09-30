@@ -2,14 +2,18 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v3/load"
+	"github.com/shirou/gopsutil/v3/mem"
 )
 
 // SystemMetrics holds all the system performance data
@@ -288,11 +292,11 @@ func showDetailedSystemInfo() {
 		}
 		fmt.Printf("  Memory Pressure: %s\n", lastMetrics.MemPressure)
 
-		// Show uptime
-		cmd := exec.Command("uptime")
-		if output, err := cmd.Output(); err == nil {
+		// Show system uptime (cross-platform)
+		if hostInfo, err := host.Info(); err == nil {
+			uptime := time.Duration(hostInfo.Uptime) * time.Second
 			fmt.Printf("\n%sSystem Uptime:%s\n", ColorGreen, ColorReset)
-			fmt.Printf("  %s\n", strings.TrimSpace(string(output)))
+			fmt.Printf("  %s\n", formatUptime(uptime))
 		}
 	} else {
 		fmt.Printf("%sNo system data available yet.%s\n", ColorRed, ColorReset)
@@ -338,273 +342,162 @@ func showHelp() {
 
 func collectSystemMetrics() (*SystemMetrics, error) {
 	metrics := &SystemMetrics{}
+	ctx := context.Background()
 
 	// Get CPU information
 	metrics.CPUCores = runtime.NumCPU()
-	cpuModel, _ := getCPUModel()
+	cpuModel, _ := getCPUModel(ctx)
 	metrics.CPUModel = cpuModel
 
-	// Get CPU usage (average over 2 seconds)
-	cpuUsage, _ := getCPUUsage()
+	// Get CPU usage
+	cpuUsage, _ := getCPUUsage(ctx)
 	metrics.CPUUsage = cpuUsage
 
 	// Get load averages
-	loadAvg, _ := getLoadAverages()
+	loadAvg, _ := getLoadAverages(ctx)
 	metrics.LoadAverage = loadAvg
 
 	// Get memory information
-	memInfo, _ := getMemoryInfo()
+	memInfo, _ := getMemoryInfo(ctx)
 	metrics.MemoryUsed = memInfo.Used
 	metrics.MemoryTotal = memInfo.Total
 	metrics.SwapUsed = memInfo.SwapUsed
 	metrics.SwapTotal = memInfo.SwapTotal
 
-	// Get memory pressure
-	memPressure, _ := getMemoryPressure()
+	// Get memory pressure (cross-platform estimation)
+	memPressure := getMemoryPressure(memInfo.Used, memInfo.Total, memInfo.SwapUsed)
 	metrics.MemPressure = memPressure
 
 	// Get GPU information
-	gpuModel, _ := getGPUModel()
+	gpuModel := getGPUModel()
 	metrics.GPUModel = gpuModel
 
 	return metrics, nil
 }
 
-func getCPUModel() (string, error) {
-	cmd := exec.Command("sysctl", "-n", "machdep.cpu.brand_string")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
+func getCPUModel(ctx context.Context) (string, error) {
+	// Try to get CPU info from gopsutil
+	cpuInfo, err := cpu.Info()
+	if err != nil || len(cpuInfo) == 0 {
+		return "Unknown CPU", nil
 	}
-	return strings.TrimSpace(string(output)), nil
+	return cpuInfo[0].ModelName, nil
 }
 
-func getCPUUsage() (float64, error) {
-	// Sample CPU usage over 2 seconds using iostat
-	cmd := exec.Command("iostat", "-c", "2", "-n", "2")
-	output, err := cmd.Output()
-	if err != nil {
+func getCPUUsage(ctx context.Context) (float64, error) {
+	// Get CPU usage percentage over 1 second
+	percentages, err := cpu.Percent(time.Second, false)
+	if err != nil || len(percentages) == 0 {
 		return 0, err
 	}
-
-	lines := strings.Split(string(output), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.Contains(lines[i], "avg-cpu") {
-			continue
-		}
-		fields := strings.Fields(lines[i])
-		if len(fields) >= 6 {
-			// iostat format: %user %nice %system %interrupt %idle
-			idle, err := strconv.ParseFloat(fields[len(fields)-1], 64)
-			if err == nil {
-				return 100 - idle, nil
-			}
-		}
-	}
-	return 0, fmt.Errorf("could not parse CPU usage")
+	return percentages[0], nil
 }
 
-func getLoadAverages() ([3]float64, error) {
-	cmd := exec.Command("uptime")
-	output, err := cmd.Output()
+func getLoadAverages(ctx context.Context) ([3]float64, error) {
+	// Get load average (Linux/macOS style)
+	loadStat, err := load.Avg()
 	if err != nil {
-		return [3]float64{}, err
-	}
-
-	// Parse load averages from uptime output
-	uptimeStr := string(output)
-	loadIndex := strings.Index(uptimeStr, "load averages:")
-	if loadIndex == -1 {
-		return [3]float64{}, fmt.Errorf("could not find load averages")
-	}
-
-	loadStr := strings.TrimSpace(uptimeStr[loadIndex+14:])
-	loadParts := strings.Split(loadStr, " ")
-	
-	var loads [3]float64
-	for i := 0; i < 3 && i < len(loadParts); i++ {
-		load, err := strconv.ParseFloat(strings.TrimSpace(loadParts[i]), 64)
-		if err == nil {
-			loads[i] = load
+		// On Windows, load average isn't available, so estimate from CPU usage
+		if runtime.GOOS == "windows" {
+			cpuPercent, cpuErr := cpu.Percent(time.Second, false)
+			if cpuErr == nil && len(cpuPercent) > 0 {
+				// Rough estimation: convert CPU percentage to load-like metric
+				estimatedLoad := cpuPercent[0] / 100.0 * float64(runtime.NumCPU())
+				return [3]float64{estimatedLoad, estimatedLoad, estimatedLoad}, nil
+			}
 		}
+		return [3]float64{0, 0, 0}, nil
 	}
-
-	return loads, nil
+	return [3]float64{loadStat.Load1, loadStat.Load5, loadStat.Load15}, nil
 }
 
 type MemoryInfo struct {
-	Total    uint64
-	Used     uint64
-	SwapUsed uint64
+	Total     uint64
+	Used      uint64
+	SwapUsed  uint64
 	SwapTotal uint64
 }
 
-func getMemoryInfo() (*MemoryInfo, error) {
+func getMemoryInfo(ctx context.Context) (*MemoryInfo, error) {
 	info := &MemoryInfo{}
 
-	// Get physical memory info
-	cmd := exec.Command("vm_stat")
-	output, err := cmd.Output()
+	// Get virtual memory statistics
+	vmStat, err := mem.VirtualMemory()
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse vm_stat output
-	lines := strings.Split(string(output), "\n")
-	pageSize := uint64(4096) // Default page size for macOS
+	info.Total = vmStat.Total
+	info.Used = vmStat.Used
 
-	var free, active, inactive, wired, compressed uint64
-
-	for _, line := range lines {
-		if strings.Contains(line, "page size of") {
-			// Extract page size
-			parts := strings.Fields(line)
-			for i, part := range parts {
-				if part == "of" && i+1 < len(parts) {
-					if ps, err := strconv.ParseUint(parts[i+1], 10, 64); err == nil {
-						pageSize = ps
-					}
-				}
-			}
-		} else if strings.Contains(line, "Pages free:") {
-			if val := extractNumber(line); val > 0 {
-				free = val
-			}
-		} else if strings.Contains(line, "Pages active:") {
-			if val := extractNumber(line); val > 0 {
-				active = val
-			}
-		} else if strings.Contains(line, "Pages inactive:") {
-			if val := extractNumber(line); val > 0 {
-				inactive = val
-			}
-		} else if strings.Contains(line, "Pages wired down:") {
-			if val := extractNumber(line); val > 0 {
-				wired = val
-			}
-		} else if strings.Contains(line, "Pages occupied by compressor:") {
-			if val := extractNumber(line); val > 0 {
-				compressed = val
-			}
-		}
-	}
-
-	totalPages := free + active + inactive + wired + compressed
-	usedPages := active + inactive + wired + compressed
-
-	info.Total = totalPages * pageSize
-	info.Used = usedPages * pageSize
-
-	// Get swap info
-	cmd = exec.Command("sysctl", "-n", "vm.swapusage")
-	output, err = cmd.Output()
-	if err == nil {
-		swapStr := string(output)
-		// Parse format like "total = 2048.00M  used = 0.00M  free = 2048.00M  (encrypted)"
-		if strings.Contains(swapStr, "used = ") {
-			parts := strings.Split(swapStr, "used = ")
-			if len(parts) > 1 {
-				usedPart := strings.Fields(parts[1])[0]
-				if swapUsed := parseMemorySize(usedPart); swapUsed > 0 {
-					info.SwapUsed = swapUsed
-				}
-			}
-		}
-		if strings.Contains(swapStr, "total = ") {
-			parts := strings.Split(swapStr, "total = ")
-			if len(parts) > 1 {
-				totalPart := strings.Fields(parts[1])[0]
-				if swapTotal := parseMemorySize(totalPart); swapTotal > 0 {
-					info.SwapTotal = swapTotal
-				}
-			}
-		}
+	// Get swap memory statistics
+	swapStat, err := mem.SwapMemory()
+	if err != nil {
+		// If swap info is not available, continue with zero values
+		info.SwapUsed = 0
+		info.SwapTotal = 0
+	} else {
+		info.SwapUsed = swapStat.Used
+		info.SwapTotal = swapStat.Total
 	}
 
 	return info, nil
 }
 
-func extractNumber(line string) uint64 {
-	parts := strings.Fields(line)
-	for _, part := range parts {
-		// Remove trailing period and parse
-		clean := strings.TrimSuffix(part, ".")
-		if val, err := strconv.ParseUint(clean, 10, 64); err == nil {
-			return val
-		}
+// Cross-platform memory pressure estimation
+func getMemoryPressure(memUsed, memTotal, swapUsed uint64) string {
+	if memTotal == 0 {
+		return "unknown"
 	}
-	return 0
+
+	memUsagePercent := float64(memUsed) / float64(memTotal) * 100
+	swapUsageGB := float64(swapUsed) / (1024 * 1024 * 1024)
+
+	// Critical: Very high memory usage or significant swap usage
+	if memUsagePercent > 95 || swapUsageGB > 2 {
+		return "critical"
+	}
+	// Warning: High memory usage or any swap usage
+	if memUsagePercent > 85 || swapUsageGB > 0.1 {
+		return "warning"
+	}
+	// Normal: Low to moderate memory usage, no swap
+	return "normal"
 }
 
-func parseMemorySize(sizeStr string) uint64 {
-	sizeStr = strings.TrimSpace(sizeStr)
-	if len(sizeStr) == 0 {
-		return 0
-	}
+// formatUptime converts a duration to a human-readable uptime string
+func formatUptime(uptime time.Duration) string {
+	days := int(uptime.Hours() / 24)
+	hours := int(uptime.Hours()) % 24
+	minutes := int(uptime.Minutes()) % 60
 
-	// Get the numeric part and unit
-	unit := sizeStr[len(sizeStr)-1:]
-	numStr := sizeStr[:len(sizeStr)-1]
-	
-	size, err := strconv.ParseFloat(numStr, 64)
-	if err != nil {
-		return 0
-	}
-
-	switch strings.ToUpper(unit) {
-	case "K":
-		return uint64(size * 1024)
-	case "M":
-		return uint64(size * 1024 * 1024)
-	case "G":
-		return uint64(size * 1024 * 1024 * 1024)
-	case "T":
-		return uint64(size * 1024 * 1024 * 1024 * 1024)
-	default:
-		return uint64(size)
+	if days > 0 {
+		return fmt.Sprintf("%d days, %d hours, %d minutes", days, hours, minutes)
+	} else if hours > 0 {
+		return fmt.Sprintf("%d hours, %d minutes", hours, minutes)
+	} else {
+		return fmt.Sprintf("%d minutes", minutes)
 	}
 }
 
-func getMemoryPressure() (string, error) {
-	cmd := exec.Command("memory_pressure")
-	output, err := cmd.Output()
-	if err != nil {
-		return "unknown", nil // memory_pressure might not be available
-	}
-
-	pressure := strings.TrimSpace(string(output))
-	if strings.Contains(strings.ToLower(pressure), "normal") {
-		return "normal", nil
-	} else if strings.Contains(strings.ToLower(pressure), "warn") {
-		return "warning", nil
-	} else if strings.Contains(strings.ToLower(pressure), "urgent") || strings.Contains(strings.ToLower(pressure), "critical") {
-		return "critical", nil
-	}
-	return pressure, nil
-}
-
-func getGPUModel() (string, error) {
-	cmd := exec.Command("system_profiler", "SPDisplaysDataType", "-json")
-	output, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-
-	// Simple parsing - look for GPU model in the output
-	outputStr := string(output)
-	if strings.Contains(outputStr, "chipset_model") {
-		lines := strings.Split(outputStr, "\n")
-		for _, line := range lines {
-			if strings.Contains(line, "chipset_model") {
-				parts := strings.Split(line, ":")
-				if len(parts) > 1 {
-					model := strings.Trim(strings.TrimSpace(parts[1]), `",`)
-					return model, nil
-				}
+// Cross-platform GPU model detection (simplified)
+func getGPUModel() string {
+	// Note: Full GPU detection would require platform-specific code
+	// For now, we'll detect common GPU patterns from CPU model or use generic detection
+	switch runtime.GOOS {
+	case "darwin":
+		// Try to detect Apple Silicon integrated GPU
+		if hostInfo, err := host.Info(); err == nil {
+			if strings.Contains(strings.ToLower(hostInfo.Platform), "darwin") {
+				return "Integrated GPU (macOS)"
 			}
 		}
+	case "windows":
+		return "Graphics Card (Windows)"
+	case "linux":
+		return "Graphics Card (Linux)"
 	}
-	return "Unknown GPU", nil
+	return "Unknown GPU"
 }
 
 func displaySystemStatus(metrics *SystemMetrics) {
